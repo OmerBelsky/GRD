@@ -1,0 +1,6 @@
+Precision: 0.8800
+Recall: 0.6667
+Accuracy: 0.7200
+Average iterations for harmful prompts: 6.07
+Premature termination count: 1
+Timed out count: 27

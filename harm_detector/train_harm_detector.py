@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from transformers import DistilBertTokenizer, DistilBertModel
 from sklearn.metrics import classification_report, accuracy_score, f1_score
-import pickle
+import dill
 from harm_detector import HarmDetector
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -112,5 +112,5 @@ print("F1 Score (macro):", f1_score(y_train, y_train_pred, average='macro'))
 # Save the SVM
 if not os.path.exists("models"):
     os.makedirs("models")
-    with open("models/harm_detector.pkl", "wb") as f:
-        pickle.dump(clf, f)
+with open("models/harm_detector.dill", "wb") as f:
+    dill.dump(clf, f)

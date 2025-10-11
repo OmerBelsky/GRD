@@ -1,0 +1,26 @@
+(define (domain guard_rail)
+    (:predicates
+        (gen ?g)
+        (llm-at ?g)
+        (next ?p ?n)
+        (harmful ?g)
+        (ended ?g)
+        (found-no-harm)
+        (found-harmful)
+    )
+    (:action generate
+        :parameters (?p ?n)
+        :precondition (and (llm-at ?p) (next ?p ?n))
+        :effect (and (llm-at ?n) (not (llm-at ?p)))
+    )
+    (:action mark-found-harm
+        :parameters (?g)
+        :precondition (and (llm-at ?g) (harmful ?g))
+        :effect (found-harmful)
+    )
+    (:action mark-found-no-harm
+        :parameters (?g)
+        :precondition (and (llm-at ?g) (ended ?g))
+        :effect (found-no-harm)
+    )
+    )
