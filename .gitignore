@@ -44,6 +44,8 @@ Desktop.ini
 *.csv
 *.tsv
 *.dat
+*.json
+*.jsonl
 
 # Ignore system files
 .idea/

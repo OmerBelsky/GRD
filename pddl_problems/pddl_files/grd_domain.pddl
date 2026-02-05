@@ -18,7 +18,7 @@
 
   (:action DoSplit
     :parameters ()
-    :precondition (and)
+    :precondition (not (split))
     :effect (and
       (split)
       (increase (total-cost) 0))
@@ -75,7 +75,8 @@
     :precondition (and
       (split) (not (done0))
       (llm-at0 ?g)
-      (harmful0 ?g))
+      (harmful0 ?g)
+      (not (found-harmful0)))
     :effect (and
       (found-harmful0)
       (increase (total-cost) 0))

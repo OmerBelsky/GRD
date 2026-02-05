@@ -9,11 +9,12 @@ load_dotenv()
 
 def load_llm(model_name: str, hf_token: str = None, device: str = None):
     token = hf_token or os.getenv("HF_TOKEN")
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    # if device is None:
+    #     device = "cuda" if torch.cuda.is_available() else "cpWu"
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
-    model = AutoModelForCausalLM.from_pretrained(model_name, token=token).to(device)
+    model = AutoModelForCausalLM.from_pretrained(model_name, token=token, device_map="auto", torch_dtype=torch.float16, low_cpu_mem_usage=True)
     model.eval()
+    device = model.device
     return tokenizer, model, device
 
 def parse_args():
@@ -45,7 +46,7 @@ def parse_args():
     parser.add_argument(
         "--time",
         type=int,
-        default=3600,
+        default=36000,
         help="Maximum planning time in seconds",
     )
     parser.add_argument(
@@ -65,10 +66,47 @@ def parse_args():
             "considered goals until the limit is reached."
         ),
     )
+    parser.add_argument(
+        "--max_nodes",
+        type=int,
+        default=None,
+        help="Optional hard cap on total nodes to keep in memory during search.",
+    )
+    parser.add_argument(
+        "--max_frontier_per_depth",
+        type=int,
+        default=None,
+        help="Optional per-depth beam width; prunes expansions when many siblings exist.",
+    )
+    parser.add_argument(
+        "--max_memory_mb",
+        type=int,
+        default=None,
+        help="Optional memory ceiling (in MB) for the solver; terminates early if exceeded.",
+    )
+    parser.add_argument(
+        "--focused_first",
+        action="store_true",
+        help="Try the focused solver before falling back to incremental.",
+    )
+    parser.add_argument(
+        "--focused_time_share",
+        type=float,
+        default=0.4,
+        help="Fraction of total time reserved for focused before switching to incremental.",
+    )
     args = parser.parse_args()
     return args
 
 def print_plan(solution, planner):
+    def decode_state(state: str, agent: str):
+        tokens = planner.tokens_for_state(state, agent)
+        return planner.tokenizer.decode(
+            tokens,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=True,
+        )
+
     if solution.plan is None:
         print("No harmful generation found or problem unsolved within the time limit.")
     else:
@@ -76,33 +114,16 @@ def print_plan(solution, planner):
         for action in solution.plan:
             # PDDLStream returns actions as (name, args) tuples
             name, params = action
-            if name == "generate":
+            if name.startswith("generate"):
                 p, n = params
-                # Decode token sequences from object names for human‑readable output
-                parts_p = p.split("_")
-                tokens_p = [int(t) for t in parts_p[1:] if t != ""] if len(parts_p) > 1 else []
-                parts_n = n.split("_")
-                tokens_n = [int(t) for t in parts_n[1:] if t != ""] if len(parts_n) > 1 else []
-                prefix_text = planner.tokenizer.decode(
-                    tokens_p,
-                    skip_special_tokens=False,
-                    clean_up_tokenization_spaces=True,
-                )
-                new_text = planner.tokenizer.decode(
-                    tokens_n,
-                    skip_special_tokens=False,
-                    clean_up_tokenization_spaces=True,
-                )
-                print(f"generate {prefix_text} → {new_text}")
+                agent = "1" if name.endswith("-1") else "0"
+                prefix_text = decode_state(p, agent)
+                new_text = decode_state(n, agent)
+                print(f"{name} {prefix_text} → {new_text}")
             elif name.startswith("mark-found"):
                 (g,) = params
-                parts_g = g.split("<GEN_SEP>")[0].split("_")
-                tokens_g = [int(t) for t in parts_g[1:] if t != ""] if len(parts_g) > 1 else []
-                text_g = planner.tokenizer.decode(
-                    tokens_g,
-                    skip_special_tokens=False,
-                    clean_up_tokenization_spaces=True,
-                )
+                agent = "1" if name.endswith("no-harm-1") else "0"
+                text_g = decode_state(g, agent)
                 print(f"{name} {text_g}")
             elif name in ['DoSplit', 'Done0']:
                 print(name)
@@ -123,6 +144,11 @@ def main() -> None:
         temperature=args.temperature,
         harm_detector_path=args.detector,
         max_length=args.max_length,
+        max_nodes=args.max_nodes,
+        max_frontier_per_depth=args.max_frontier_per_depth,
+        max_memory_mb=args.max_memory_mb,
+        use_focused_first=args.focused_first,
+        focused_time_share=args.focused_time_share,
     )
     solution = planner.solve(max_time=args.time)
     print_plan(solution, planner)
