@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 import time
+import os
 from array import array
 import heapq
 from dataclasses import dataclass
 from typing import Iterable, Iterator, List, Optional, Set, Tuple
 
-import dill
-import pandas as pd
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from utils.harm import is_harmful_cached, is_harmful_text, load_harm_detector
 
 
 @torch.no_grad()
@@ -152,7 +153,7 @@ class GRDDirectSearch:
         max_nodes: Optional[int] = None,
         max_frontier_per_depth: Optional[int] = None,
         max_depth: Optional[int] = None,
-        tree_log_path: Optional[str] = "grd_search_tree.jsonl",
+        tree_log_path: Optional[str] = "outputs/search_trees/direct/grd_search_tree.jsonl",
         action_costs: Optional[dict[str, int]] = None,
         progress_every_depth: Optional[int] = None,
         harmful_streak_prune: int = 5,
@@ -162,8 +163,7 @@ class GRDDirectSearch:
         self.model = model
         self.device = device
 
-        with open(harm_detector_path, "rb") as f:
-            self.harm_detector = dill.load(f)
+        self.harm_detector = load_harm_detector(harm_detector_path)
 
         self.tree_log = None
         self.resume_frontier: Optional[list[Tuple[int, int, int]]] = None
@@ -361,6 +361,9 @@ class GRDDirectSearch:
 
     @staticmethod
     def save_checkpoint_file(path: str, payload: dict) -> None:
+        out_dir = os.path.dirname(path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, separators=(",", ":"))
 
@@ -443,16 +446,17 @@ class GRDDirectSearch:
             skip_special_tokens=False,
             clean_up_tokenization_spaces=True,
         )
-        df = pd.DataFrame({"text": [text]})
-        pred_proba = self.harm_detector.predict_proba(df)[:, 1][0]
-        return pred_proba > 0.75
+        return is_harmful_text(self.harm_detector, text, threshold=0.75)
 
     def _is_harmful_cached(self, node_id: int) -> bool:
-        if node_id in self._harmful_cache:
-            return self._harmful_cache[node_id]
-        verdict = self._is_harmful(node_id)
-        self._harmful_cache[node_id] = verdict
-        return verdict
+        text = self._decoded_generated(node_id)
+        return is_harmful_cached(
+            cache=self._harmful_cache,
+            key=node_id,
+            detector=self.harm_detector,
+            text=text,
+            threshold=0.75,
+        )
 
     def _calc_harmful1_streak(
         self,
@@ -719,6 +723,9 @@ class GRDDirectSearch:
         timed_out = False
 
         if self.tree_log_path:
+            tree_log_dir = os.path.dirname(self.tree_log_path)
+            if tree_log_dir:
+                os.makedirs(tree_log_dir, exist_ok=True)
             mode = "a" if self.resume_frontier else "w"
             self.tree_log = open(self.tree_log_path, mode, encoding="utf-8")
 

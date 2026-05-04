@@ -1,8 +1,5 @@
 from typing import Iterator, Optional, Tuple, List
 
-import dill
-import pandas as pd
-
 from pddlstream.language.generator import from_fn, from_gen_fn
 from pddlstream.language.constants import PDDLProblem
 
@@ -17,7 +14,18 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 
 from dotenv import load_dotenv
+from utils.harm import is_harmful_text, load_harm_detector
 load_dotenv()
+
+GUARDRAIL_GENERATION_LOG_PATH = "outputs/logs/guardrail/generation_log.txt"
+
+
+def append_guardrail_generation_log(message: str) -> None:
+    log_dir = os.path.dirname(GUARDRAIL_GENERATION_LOG_PATH)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    with open(GUARDRAIL_GENERATION_LOG_PATH, "a", encoding="utf-8") as log_file:
+        log_file.write(message + "\n")
 
 @torch.no_grad()
 def nucleus_tokens(
@@ -75,8 +83,7 @@ class GuardRailPDDLStream:
         self.model = model
         self.device = device
 
-        with open(harm_detector_path, "rb") as f:
-            self.harm_detector = dill.load(f)
+        self.harm_detector = load_harm_detector(harm_detector_path)
 
         # Encode the starting prompt into a sequence of token IDs without special tokens
         try:
@@ -155,8 +162,7 @@ class GuardRailPDDLStream:
                 clean_up_tokenization_spaces=True,
             )
             print("Generated text:", gen_text, "from prefix:", prefix_text)
-            with open("generation_log.txt", "a", encoding='utf-8') as log_file:
-                log_file.write(f"Prefix: {prefix_text} -> Generated: {gen_text}\n")
+            append_guardrail_generation_log(f"Prefix: {prefix_text} -> Generated: {gen_text}")
             yield (new_slug,)
 
     def harmful_stream(self, g: str) -> Optional[Tuple[()]]:
@@ -180,13 +186,9 @@ class GuardRailPDDLStream:
             skip_special_tokens=False,
             clean_up_tokenization_spaces=True,
         )
-        df = pd.DataFrame({"text": [text]})
-        pred_proba = self.harm_detector.predict_proba(df)[:, 1][0]
-        # if pred != "Safe":
-        if pred_proba > 0.75:
+        if is_harmful_text(self.harm_detector, text, threshold=0.75):
             print('Harmful generation detected for text:', text)
-            with open("generation_log.txt", "a", encoding='utf-8') as log_file:
-                log_file.write(f"Harmful generation detected: {text}\n")
+            append_guardrail_generation_log(f"Harmful generation detected: {text}")
             return tuple()
         return None
 
@@ -210,8 +212,9 @@ class GuardRailPDDLStream:
         if ((eos_id is not None) and (eos_id in tokens)) or len(tokens) >= self.max_length:
             print('Generation ended for text:', self.tokenizer.decode(
                 tokens[self.input_length:], skip_special_tokens=False, clean_up_tokenization_spaces=True))
-            with open("generation_log.txt", "a", encoding='utf-8') as log_file:
-                log_file.write(f"Generation ended: {self.tokenizer.decode(tokens[self.input_length:], skip_special_tokens=False, clean_up_tokenization_spaces=True)}\n")
+            append_guardrail_generation_log(
+                f"Generation ended: {self.tokenizer.decode(tokens[self.input_length:], skip_special_tokens=False, clean_up_tokenization_spaces=True)}"
+            )
             return tuple()
         return None
 

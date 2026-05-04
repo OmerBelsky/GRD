@@ -2,9 +2,9 @@ import pandas as pd
 import numpy as np
 from pddl_problems.guardrail_pddl import GuardRailPDDLStream
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
 import os
 from dotenv import load_dotenv
+from utils.modeling import load_llm_to_device
 load_dotenv()
 
 # Load the AEGIS dataset
@@ -79,20 +79,11 @@ def preprocess_aegis(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
 
     return df.drop(columns=label_cols)
 
-def load_llm(model_name: str, hf_token: str = None, device: str = None):
-    token = hf_token or os.getenv("HF_TOKEN")
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
-    model = AutoModelForCausalLM.from_pretrained(model_name, token=token).to(device)
-    model.eval()
-    return tokenizer, model, device
-
 aegis_test_df = preprocess_aegis(aegis_test_df)
 aegis_test_df = aegis_test_df[aegis_test_df['text_type'] == 'user_message']
 # aegis_test_df = preprocess_aegis(aegis_test_df)
 
-tokenizer, model, device = load_llm("meta-llama/Llama-3.2-3B-Instruct")
+tokenizer, model, device = load_llm_to_device("meta-llama/Llama-3.2-3B-Instruct")
 
 
 negatives = []
@@ -184,8 +175,8 @@ print(f"Average iterations for harmful prompts: {avg_iters:.2f}")
 print(f"Premature termination count: {premature_termination_count}")
 print(f"Timed out count: {timed_out_count}")
 
-os.makedirs('results', exist_ok=True)
-with open('results/grd_benchmark_results.txt', 'w') as f:
+os.makedirs('outputs/reports/benchmark', exist_ok=True)
+with open('outputs/reports/benchmark/grd_benchmark_results.txt', 'w') as f:
     f.write(f"Precision: {precision:.4f}\n")
     f.write(f"Recall: {recall:.4f}\n")
     f.write(f"Accuracy: {accuracy:.4f}\n")

@@ -2,8 +2,6 @@ from array import array
 from functools import partial
 from typing import Iterable, Iterator, List, Optional, Set, Tuple
 import time
-import dill
-import pandas as pd
 import os
 
 from pddlstream.language.generator import from_fn, from_gen_fn
@@ -18,7 +16,18 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 
 from dotenv import load_dotenv
+from utils.harm import is_harmful_text, load_harm_detector
 load_dotenv()
+
+GRD_GENERATION_LOG_PATH = "outputs/logs/grd/grd_generation_log.txt"
+
+
+def append_grd_generation_log(message: str) -> None:
+    log_dir = os.path.dirname(GRD_GENERATION_LOG_PATH)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    with open(GRD_GENERATION_LOG_PATH, "a", encoding="utf-8") as log_file:
+        log_file.write(message + "\n")
 
 @torch.no_grad()
 def nucleus_tokens(
@@ -178,8 +187,7 @@ class GRDPDDLStream:
         self.device = device
         self._node_limit_reached = False
 
-        with open(harm_detector_path, "rb") as f:
-            self.harm_detector = dill.load(f)
+        self.harm_detector = load_harm_detector(harm_detector_path)
 
         self._init_node_storage()
 
@@ -282,8 +290,7 @@ class GRDPDDLStream:
             )
             self.generated_states.add(new_slug)
             self.frontier_counts[new_depth] = self.frontier_counts.get(new_depth, 0) + 1
-            with open("grd_generation_log.txt", "a", encoding='utf-8') as log_file:
-                log_file.write(f"Prefix: {prefix_text} -> Generated: {gen_text}\n")
+            append_grd_generation_log(f"Prefix: {prefix_text} -> Generated: {gen_text}")
             yield (new_slug,)
 
     def harmful_stream(self, g: str) -> Optional[Tuple[()]]:
@@ -301,13 +308,9 @@ class GRDPDDLStream:
             skip_special_tokens=False,
             clean_up_tokenization_spaces=True,
         )
-        df = pd.DataFrame({"text": [text]})
-        pred_proba = self.harm_detector.predict_proba(df)[:, 1][0]
-        # if pred != "Safe":
-        if pred_proba > 0.75:
+        if is_harmful_text(self.harm_detector, text, threshold=0.75):
             print('Harmful generation detected for text:', text)
-            with open("grd_generation_log.txt", "a", encoding='utf-8') as log_file:
-                log_file.write(f"Harmful generation detected: {text}\n")
+            append_grd_generation_log(f"Harmful generation detected: {text}")
             return tuple()
         return None
 
@@ -327,8 +330,9 @@ class GRDPDDLStream:
         if ((eos_id is not None) and (eos_id in tokens)) or length_limit_reached:
             print('Generation ended for text:', self.tokenizer.decode(
                 tokens[self.input_length:], skip_special_tokens=False, clean_up_tokenization_spaces=True))
-            with open("grd_generation_log.txt", "a", encoding='utf-8') as log_file:
-                log_file.write(f"Generation ended: {self.tokenizer.decode(tokens[self.input_length:], skip_special_tokens=False, clean_up_tokenization_spaces=True)}\n")
+            append_grd_generation_log(
+                f"Generation ended: {self.tokenizer.decode(tokens[self.input_length:], skip_special_tokens=False, clean_up_tokenization_spaces=True)}"
+            )
             return tuple()
         return None
 
