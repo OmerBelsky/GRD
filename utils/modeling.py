@@ -2,6 +2,18 @@ import os
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
+
+
+def _disable_torchvision_for_transformers() -> None:
+    try:
+        import transformers.utils.import_utils as import_utils
+
+        import_utils._torchvision_available = False
+        import_utils._torchvision_version = "N/A"
+    except Exception:
+        return
+
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
@@ -38,6 +50,7 @@ def seed_torch(seed: Optional[int]) -> None:
 
 def load_tokenizer(model_name: str, hf_token: Optional[str] = None) -> AutoTokenizer:
     token = resolve_hf_token(hf_token)
+    _disable_torchvision_for_transformers()
     return AutoTokenizer.from_pretrained(model_name, token=token)
 
 
@@ -53,6 +66,7 @@ def load_model_auto(
 ) -> Tuple[AutoTokenizer, AutoModelForCausalLM]:
     token = resolve_hf_token(hf_token)
     target_device = resolve_target_device(device)
+    _disable_torchvision_for_transformers()
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
 
     resolved_dtype = dtype if torch_dtype is None else torch_dtype

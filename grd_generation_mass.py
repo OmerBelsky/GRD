@@ -1,7 +1,10 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 import os
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -14,7 +17,7 @@ from transformers.generation.logits_process import (
     TopPLogitsWarper,
 )
 
-from utils.modeling import load_model_auto
+from utils.modeling import load_model_auto, load_tokenizer
 
 
 @dataclass
@@ -25,6 +28,193 @@ class UniqueGeneration:
     continuation_ids: List[int]
     count: int = 1
     used_source: str = "unknown"
+
+
+@dataclass
+class VLLMGenerateClient:
+    endpoint: str
+    model_name: str
+    timeout_s: float = 600.0
+    vocab_token_ids: Optional[List[int]] = None
+
+    def score_sequence(
+        self,
+        prompt_ids: List[int],
+        continuation_ids: List[int],
+        temperature: float,
+        top_p: float,
+        top_k: int,
+    ) -> Tuple[float, float, int]:
+        if self.vocab_token_ids is None:
+            raise ValueError("vocab_token_ids must be provided for vLLM scoring")
+
+        log_mass_original = 0.0
+        log_mass_nucleus = 0.0
+
+        for j, target_tid in enumerate(continuation_ids):
+            prefix_ids = prompt_ids + continuation_ids[:j]
+            request_payload = {
+                "model": self.model_name,
+                "token_ids": prefix_ids,
+                "sampling_params": {
+                    "max_tokens": 1,
+                    "temperature": 0.0,
+                    "logprobs": 1,
+                    "logprob_token_ids": self.vocab_token_ids,
+                    "detokenize": False,
+                },
+                "stream": False,
+            }
+            response = self._post_json(request_payload)
+            position_map = self._extract_logprob_map(response)
+
+            step_logprob_original = position_map.get(target_tid, -float("inf"))
+            step_logprob_nucleus = _compute_nucleus_log_prob_from_logprobs(
+                position_map=position_map,
+                target_tid=target_tid,
+                top_p=top_p,
+                top_k=top_k,
+            )
+
+            log_mass_original += step_logprob_original
+            log_mass_nucleus += step_logprob_nucleus
+
+        return log_mass_original, log_mass_nucleus, len(continuation_ids)
+
+    def _extract_logprob_map(self, response: dict) -> Dict[int, float]:
+        choices = response.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("vLLM response did not include choices")
+
+        choice = choices[0]
+        logprobs = choice.get("logprobs")
+        if isinstance(logprobs, dict):
+            content = logprobs.get("content")
+            if isinstance(content, list) and content:
+                position_map = self._extract_from_logprobs_content(content[0])
+                if position_map:
+                    return position_map
+
+        if isinstance(logprobs, list) and logprobs:
+            position_map = _normalize_prompt_logprob_map(logprobs[0])
+            if position_map:
+                return position_map
+
+        raise RuntimeError("vLLM response did not include usable logprobs")
+
+    def _extract_from_logprobs_content(self, content_item) -> Dict[int, float]:
+        if not isinstance(content_item, dict):
+            return {}
+
+        position_map: Dict[int, float] = {}
+        top_logprobs = content_item.get("top_logprobs")
+        if isinstance(top_logprobs, list):
+            for entry in top_logprobs:
+                if not isinstance(entry, dict):
+                    continue
+                token = entry.get("token")
+                logprob = entry.get("logprob")
+                token_id = _parse_token_id(token)
+                if token_id is not None and isinstance(logprob, (int, float)):
+                    position_map[token_id] = float(logprob)
+
+        if position_map:
+            return position_map
+
+        token = content_item.get("token")
+        logprob = content_item.get("logprob")
+        token_id = _parse_token_id(token)
+        if token_id is not None and isinstance(logprob, (int, float)):
+            position_map[token_id] = float(logprob)
+        return position_map
+
+    def _post_json(self, payload: dict) -> dict:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib_request.Request(
+            self.endpoint,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=self.timeout_s) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib_error.HTTPError as exc:
+            message = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"vLLM request failed ({exc.code}): {message}") from exc
+
+
+def _normalize_prompt_logprob_map(raw_entry) -> Dict[int, float]:
+    if raw_entry is None:
+        return {}
+    if isinstance(raw_entry, dict):
+        normalized: Dict[int, float] = {}
+        for key, value in raw_entry.items():
+            token_id = int(key)
+            if isinstance(value, dict):
+                normalized[token_id] = float(value["logprob"])
+            else:
+                normalized[token_id] = float(value)
+        return normalized
+    return {}
+
+
+def _parse_token_id(token) -> Optional[int]:
+    if not isinstance(token, str):
+        return None
+    if token.startswith("token_id:"):
+        try:
+            return int(token.split(":", 1)[1])
+        except ValueError:
+            return None
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+def _get_vocab_token_ids(tokenizer) -> List[int]:
+    return list(range(len(tokenizer)))
+
+
+def _compute_nucleus_log_prob_from_logprobs(
+    *,
+    position_map: Dict[int, float],
+    target_tid: int,
+    top_p: float,
+    top_k: int,
+) -> float:
+    if target_tid not in position_map:
+        return -float("inf")
+
+    sorted_items = sorted(position_map.items(), key=lambda item: item[1], reverse=True)
+    candidate_items = sorted_items
+
+    if top_k > 0:
+        candidate_items = candidate_items[: max(1, top_k)]
+
+    clipped_top_p = float(min(max(top_p, 0.0), 1.0))
+    if 0.0 < clipped_top_p < 1.0:
+        cumulative_prob = 0.0
+        nucleus_items = []
+        for token_id, logprob in candidate_items:
+            nucleus_items.append((token_id, logprob))
+            cumulative_prob += math.exp(logprob)
+            if cumulative_prob >= clipped_top_p:
+                break
+        candidate_items = nucleus_items
+
+    candidate_token_ids = {token_id for token_id, _ in candidate_items}
+    if target_tid not in candidate_token_ids:
+        return -float("inf")
+
+    candidate_logprobs = torch.tensor([logprob for _, logprob in candidate_items], dtype=torch.float64)
+    return float(position_map[target_tid] - torch.logsumexp(candidate_logprobs, dim=0).item())
+
+
+def _get_vocab_token_ids(tokenizer) -> List[int]:
+    vocab_size = len(tokenizer)
+    return list(range(vocab_size))
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,6 +230,25 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="meta-llama/Llama-3.2-3B-Instruct",
         help="HuggingFace model identifier used to score generations.",
+    )
+    parser.add_argument(
+        "--model-backend",
+        type=str,
+        default="transformers",
+        choices=["transformers", "vllm"],
+        help="Backend used to score generation mass.",
+    )
+    parser.add_argument(
+        "--vllm-endpoint",
+        type=str,
+        default=os.getenv("VLLM_GENERATE_ENDPOINT", "http://127.0.0.1:8000/inference/v1/generate"),
+        help="vLLM token-in/token-out generate endpoint for backend=vllm.",
+    )
+    parser.add_argument(
+        "--vllm-concurrency",
+        type=int,
+        default=8,
+        help="Maximum number of in-flight vLLM scoring requests to run concurrently.",
     )
     parser.add_argument("--temperature", type=float, default=0.5, help="Sampling temperature used in generation.")
     parser.add_argument("--top-p", type=float, default=0.8, help="Nucleus top-p used in generation.")
@@ -271,12 +480,11 @@ def compute_nucleus_log_prob(
     filtered_scores: torch.Tensor,
     target_tid: int,
     candidate_mask: torch.Tensor,
-    fallback_logprob: float,
 ) -> float:
     """Compute target log-prob under nucleus-filtered distribution.
 
-    If the target token is excluded by nucleus/top-k filtering, fall back to its
-    original model log-probability.
+    If the target token is excluded by nucleus/top-k filtering, its strict
+    top-p/top-k probability is zero.
     """
 
     nucleus_scores = filtered_scores[candidate_mask]
@@ -292,9 +500,8 @@ def compute_nucleus_log_prob(
     if candidate_mask[target_tid].item():
         target_score = filtered_scores[target_tid]
         return float(target_score.item() - log_Z_nucleus.item())
-    else:
-        # Keep the original-model token value for tokens outside nucleus.
-        return fallback_logprob
+
+    return -float("inf")
 
 
 def score_sequence_logs(
@@ -304,7 +511,15 @@ def score_sequence_logs(
     temperature: float,
     top_p: float,
     top_k: int,
+    *,
+    backend: str = "transformers",
+    vllm_client: Optional[VLLMGenerateClient] = None,
 ) -> Tuple[float, float, int]:
+    if backend == "vllm":
+        if vllm_client is None:
+            raise ValueError("vllm backend requires vllm_client")
+        return vllm_client.score_sequence(prompt_ids, continuation_ids, temperature, top_p, top_k)
+
     seq_ids = prompt_ids + continuation_ids
     input_tensor = torch.tensor([seq_ids], dtype=torch.long, device=model.device)
 
@@ -342,13 +557,51 @@ def score_sequence_logs(
                 filtered_scores=filtered_scores,
                 target_tid=target_tid,
                 candidate_mask=candidate_mask,
-                fallback_logprob=step_logprob_original,
             )
 
         log_mass_original += step_logprob_original
         log_mass_nucleus += step_logprob_nucleus
 
     return log_mass_original, log_mass_nucleus, len(continuation_ids)
+
+
+def score_unique_generations(
+    unique_generations: List[UniqueGeneration],
+    *,
+    model,
+    backend: str,
+    vllm_client: Optional[VLLMGenerateClient],
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    max_workers: int,
+):
+    def _score_item(item: UniqueGeneration):
+        log_orig, log_nuc, tok_count = score_sequence_logs(
+            model=model,
+            prompt_ids=item.prompt_ids,
+            continuation_ids=item.continuation_ids,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            backend=backend,
+            vllm_client=vllm_client,
+        )
+        return item, log_orig, log_nuc, tok_count
+
+    if backend == "vllm" and max_workers > 1 and len(unique_generations) > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_score_item, item) for item in unique_generations]
+            for future in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Scoring unique generations",
+                unit="gen",
+            ):
+                yield future.result()
+    else:
+        for item in tqdm(unique_generations, desc="Scoring unique generations", unit="gen"):
+            yield _score_item(item)
 
 
 def safe_exp(log_x: float) -> float:
@@ -362,9 +615,20 @@ def main() -> None:
     model_device = resolve_model_device_arg(args)
 
     print("Loading model and tokenizer...")
-    if model_device:
-        print(f"Using single-device model placement: {model_device}")
-    tokenizer, model = load_model_auto(args.model, args.hf_token, device=model_device)
+    if args.model_backend == "vllm":
+        tokenizer = load_tokenizer(args.model, args.hf_token)
+        model = None
+        vllm_client = VLLMGenerateClient(
+            endpoint=args.vllm_endpoint,
+            model_name=args.model,
+            vocab_token_ids=_get_vocab_token_ids(tokenizer),
+        )
+        print(f"Using vLLM generate endpoint: {args.vllm_endpoint}")
+    else:
+        if model_device:
+            print(f"Using single-device model placement: {model_device}")
+        tokenizer, model = load_model_auto(args.model, args.hf_token, device=model_device)
+        vllm_client = None
 
     print("Reading JSONL and deduplicating generations...")
     unique_generations, load_stats = load_unique_generations(
@@ -385,15 +649,16 @@ def main() -> None:
 
     per_sequence = []
 
-    for item in tqdm(unique_generations, desc="Scoring unique generations", unit="gen"):
-        log_orig, log_nuc, tok_count = score_sequence_logs(
-            model=model,
-            prompt_ids=item.prompt_ids,
-            continuation_ids=item.continuation_ids,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-        )
+    for item, log_orig, log_nuc, tok_count in score_unique_generations(
+        unique_generations,
+        model=model,
+        backend=args.model_backend,
+        vllm_client=vllm_client,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        max_workers=max(1, int(args.vllm_concurrency)),
+    ):
 
         total_log_mass_original = logaddexp_scalar(total_log_mass_original, log_orig)
         total_log_mass_nucleus = logaddexp_scalar(total_log_mass_nucleus, log_nuc)
@@ -440,6 +705,8 @@ def main() -> None:
             "input": {
                 "jsonl": args.jsonl,
                 "model": args.model,
+                "model_backend": args.model_backend,
+                "vllm_endpoint": args.vllm_endpoint if args.model_backend == "vllm" else None,
                 "model_device": model_device,
                 "single_free_gpu": args.single_free_gpu,
                 "temperature": args.temperature,

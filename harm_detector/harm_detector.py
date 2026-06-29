@@ -30,20 +30,33 @@ class HarmDetector(BaseEstimator, ClassifierMixin):
             cls_emb = outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy()
         return cls_emb
 
+    def get_cls_embedding_batch(self, texts):
+        if not texts:
+            return np.empty((0, 0))
+        inputs = self.tokenizer(
+            list(texts),
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+            max_length=512,
+        )
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        with torch.no_grad():
+            outputs = self.bert_model(**inputs)
+            cls_emb = outputs.last_hidden_state[:, 0, :].cpu().numpy()
+        return cls_emb
+
     def fit(self, X, y):
-        enmbeddings = X['text'].apply(self.get_cls_embedding)
-        X_embedded = np.vstack(enmbeddings)
+        X_embedded = self.get_cls_embedding_batch(X['text'].tolist())
         self.classifier.fit(X_embedded, y)
         return self
 
     def predict(self, X):
-        embeddings = X['text'].apply(self.get_cls_embedding)
-        X_embedded = np.vstack(embeddings)
+        X_embedded = self.get_cls_embedding_batch(X['text'].tolist())
         return self.classifier.predict(X_embedded)
     
     def predict_proba(self, X):
-        embeddings = X['text'].apply(self.get_cls_embedding)
-        X_embedded = np.vstack(embeddings)
+        X_embedded = self.get_cls_embedding_batch(X['text'].tolist())
         probs = self.classifier.predict_proba(X_embedded)
         return probs
     
