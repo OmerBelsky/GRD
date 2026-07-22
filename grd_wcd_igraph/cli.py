@@ -10,6 +10,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Standalone iGraph-based offline WCD runner")
     parser.add_argument("--jsonl", required=True, type=str, help="Input generations JSONL")
     parser.add_argument("--prompt", type=str, default=None, help="Optional prompt override")
+    parser.add_argument(
+        "--system-prompt-id",
+        type=str,
+        default=None,
+        help="Optional system prompt ID used to generate the input JSONL.",
+    )
     parser.add_argument("--max-rows", type=int, default=None, help="Optional max rows to read from JSONL")
 
     parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-3B-Instruct", help="Model name")

@@ -22,6 +22,8 @@ DEFAULT_OUTPUT_DIR = "outputs/generations/batch"
 OUTPUT_FILENAME_TEMPLATE = (
     "prompt={prompt}__model={model}__temp={temperature}__top_p={top_p}.jsonl"
 )
+SYSTEM_PROMPT_TOKEN_TEMPLATE = "system_prompt={system_prompt}"
+SYSTEM_PROMPT_PLACEHOLDER = "{user_prompt}"
 
 
 @dataclass
@@ -133,14 +135,72 @@ def build_default_output_path(
     model: str,
     temperature: float,
     top_p: float,
+    system_prompt_id: Optional[str] = None,
 ) -> str:
-    filename = OUTPUT_FILENAME_TEMPLATE.format(
-        prompt=_slugify_for_filename(prompt),
-        model=_slugify_for_filename(model),
-        temperature=_format_float_for_filename(temperature),
-        top_p=_format_float_for_filename(top_p),
-    )
+    filename_parts = [
+        f"prompt={_slugify_for_filename(prompt)}",
+        f"model={_slugify_for_filename(model)}",
+    ]
+    if system_prompt_id:
+        filename_parts.append(
+            SYSTEM_PROMPT_TOKEN_TEMPLATE.format(
+                system_prompt=_slugify_for_filename(system_prompt_id)
+            )
+        )
+    filename_parts.append(f"temp={_format_float_for_filename(temperature)}")
+    filename_parts.append(f"top_p={_format_float_for_filename(top_p)}")
+    filename = "__".join(filename_parts) + ".jsonl"
     return os.path.join(DEFAULT_OUTPUT_DIR, filename)
+
+
+def _normalize_system_prompt_template(template: str) -> str:
+    return template.replace("{user prompt}", SYSTEM_PROMPT_PLACEHOLDER)
+
+
+def _render_system_prompt(template: str, user_prompt: str) -> str:
+    normalized = _normalize_system_prompt_template(template)
+    if SYSTEM_PROMPT_PLACEHOLDER in normalized:
+        return normalized.format(user_prompt=user_prompt)
+    if "{}" in normalized:
+        return normalized.format(user_prompt)
+    raise SystemExit(
+        "System prompt template must include {user_prompt}, {user prompt}, or {} placeholder"
+    )
+
+
+def resolve_system_prompt_config(args: argparse.Namespace) -> Tuple[Optional[str], Optional[str]]:
+    if args.system_prompt_id and args.system_prompt_path:
+        raise SystemExit("Use either --system-prompt-id or --system-prompt-path, not both")
+
+    if args.system_prompt_path:
+        with open(args.system_prompt_path, "r", encoding="utf-8") as handle:
+            template = handle.read()
+        normalized = _normalize_system_prompt_template(template)
+        if SYSTEM_PROMPT_PLACEHOLDER not in normalized and "{}" not in normalized:
+            raise SystemExit(
+                "System prompt template must include {user_prompt}, {user prompt}, or {} placeholder"
+            )
+        template_id = os.path.splitext(os.path.basename(args.system_prompt_path))[0]
+        return template_id, template
+
+    if args.system_prompt_id:
+        prompt_filename = f"{args.system_prompt_id}.txt"
+        prompt_path = os.path.join(args.system_prompts_dir, prompt_filename)
+        if not os.path.exists(prompt_path):
+            raise SystemExit(
+                "System prompt file not found at "
+                f"{prompt_path}. Expected --system-prompts-dir/<system-prompt-id>.txt"
+            )
+        with open(prompt_path, "r", encoding="utf-8") as handle:
+            template = handle.read()
+        normalized = _normalize_system_prompt_template(template)
+        if SYSTEM_PROMPT_PLACEHOLDER not in normalized and "{}" not in normalized:
+            raise SystemExit(
+                "System prompt template must include {user_prompt}, {user prompt}, or {} placeholder"
+            )
+        return args.system_prompt_id, template
+
+    return None, None
 
 
 def parse_args() -> argparse.Namespace:
@@ -238,7 +298,25 @@ def parse_args() -> argparse.Namespace:
         "--system-prompt-path",
         type=str,
         default="",
-        help="Path to a file containing the system prompt template (deprecated feature).",
+        help=(
+            "Path to a file containing the system prompt template. "
+            "Template must include {user_prompt}, {user prompt}, or {}."
+        ),
+    )
+    parser.add_argument(
+        "--system-prompt-id",
+        type=str,
+        default="",
+        help=(
+            "System prompt template ID resolved from --system-prompts-dir/<id>.txt. "
+            "Included in output filename when set."
+        ),
+    )
+    parser.add_argument(
+        "--system-prompts-dir",
+        type=str,
+        default="system_prompts",
+        help="Directory containing named system prompt templates as <id>.txt files.",
     )
     parser.add_argument(
         "--model-backend",
@@ -348,11 +426,10 @@ def main() -> None:
         os.makedirs(args.output_dir, exist_ok=True)
 
     raw_prompts = load_prompts(args.prompts_file, args.prompts_file_type)
+    system_prompt_id, system_prompt_template = resolve_system_prompt_config(args)
     prompts = raw_prompts
-    if args.system_prompt_path:
-        with open(args.system_prompt_path, "r", encoding="utf-8") as f:
-            system_prompt = f.read()
-        prompts = [system_prompt.format(prompt) for prompt in raw_prompts]
+    if system_prompt_template:
+        prompts = [_render_system_prompt(system_prompt_template, prompt) for prompt in raw_prompts]
 
     if args.model_backend == "vllm":
         if model_device:
@@ -389,6 +466,7 @@ def main() -> None:
                     model=args.model,
                     temperature=args.temperature,
                     top_p=args.top_p,
+                    system_prompt_id=system_prompt_id,
                 )
             ),
         )
@@ -503,6 +581,8 @@ def main() -> None:
                                 "prompt_token_count": len(prompt_ids),
                                 "continuation_ids": continuation_ids,
                             }
+                            if system_prompt_id:
+                                record["system_prompt_id"] = system_prompt_id
                             next_id_by_output[output_path] += 1
                             remaining_by_output[output_path] -= 1
 
@@ -561,6 +641,8 @@ def main() -> None:
                         "prompt_token_count": prompt_len,
                         "continuation_ids": continuation_ids,
                     }
+                    if system_prompt_id:
+                        record["system_prompt_id"] = system_prompt_id
                     next_id_by_output[output_path] += 1
                     remaining_by_output[output_path] -= 1
 

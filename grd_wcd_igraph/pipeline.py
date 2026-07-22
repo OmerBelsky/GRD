@@ -434,6 +434,7 @@ def run_pipeline(args) -> List[str]:
                 status="ok",
                 jsonl=args.jsonl,
                 prompt=prefix_graph.prompt,
+                system_prompt_id=args.system_prompt_id,
                 model=args.model,
                 temperature=args.temperature,
                 top_p=args.top_p,
