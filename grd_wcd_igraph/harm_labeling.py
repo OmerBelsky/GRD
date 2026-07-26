@@ -38,6 +38,30 @@ def score_harm_probabilities(
     return harm_probs
 
 
+def score_harm_probabilities_for_nodes(
+    *,
+    prefix_graph: PrefixGraph,
+    tokenizer,
+    harm_detector,
+    node_ids: List[int],
+    batch_size: int,
+) -> Dict[int, float]:
+    from utils.harm import harm_proba_batch
+
+    unique_nodes = sorted({node_id for node_id in node_ids if node_id != 0})
+    if not unique_nodes:
+        return {}
+
+    scores: Dict[int, float] = {}
+    for batch in tqdm(list(_chunked(unique_nodes, batch_size)), desc="Scoring harm", unit="batch"):
+        texts = [get_node_text(tokenizer, prefix_graph, vid) for vid in batch]
+        probs = harm_proba_batch(harm_detector, texts)
+        for vid, prob in zip(batch, probs):
+            scores[vid] = float(prob)
+
+    return scores
+
+
 def assign_goal_labels(
     *,
     prefix_graph: PrefixGraph,

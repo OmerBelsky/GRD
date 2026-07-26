@@ -124,3 +124,97 @@ def build_prefix_graph(tokenizer, jsonl_path: str, prompt_override: Optional[str
 
 def get_node_text(tokenizer, prefix_graph: PrefixGraph, node_id: int) -> str:
     return tokenizer.decode(prefix_graph.gen_tokens[node_id], skip_special_tokens=False, clean_up_tokenization_spaces=True)
+
+
+def create_empty_prefix_graph(prompt_text: str) -> PrefixGraph:
+    graph = Graph(n=1, edges=[], directed=True)
+    graph.vs["parent"] = [-1]
+    graph.vs["depth"] = [0]
+    graph.vs["token_id"] = [None]
+    graph.vs["visit_count"] = [0]
+    graph.vs["first_seen_row"] = [-1]
+    graph.vs["is_leaf"] = [False]
+    return PrefixGraph(
+        graph=graph,
+        prompt=prompt_text,
+        max_depth=0,
+        parent=[-1],
+        depth=[0],
+        token_id=[None],
+        gen_tokens=[tuple()],
+        children=[[]],
+        nodes_by_depth={0: [0]},
+        leaves=[],
+        path_to_vid={tuple(): 0},
+        visit_count=[0],
+        first_seen_row=[-1],
+    )
+
+
+def _rebuild_derived_graph_views(prefix_graph: PrefixGraph) -> None:
+    edges = [(parent_id, vid) for vid, parent_id in enumerate(prefix_graph.parent) if vid != 0]
+    graph = Graph(n=len(prefix_graph.parent), edges=edges, directed=True)
+    graph.vs["parent"] = list(prefix_graph.parent)
+    graph.vs["depth"] = list(prefix_graph.depth)
+    graph.vs["token_id"] = list(prefix_graph.token_id)
+    graph.vs["visit_count"] = list(prefix_graph.visit_count)
+    graph.vs["first_seen_row"] = list(prefix_graph.first_seen_row)
+
+    children = [graph.neighbors(vid, mode="out") for vid in range(graph.vcount())]
+    leaves = [vid for vid, child_ids in enumerate(children) if vid != 0 and len(child_ids) == 0]
+    leaf_set = set(leaves)
+    graph.vs["is_leaf"] = [vid in leaf_set for vid in range(graph.vcount())]
+
+    nodes_by_depth: Dict[int, List[int]] = defaultdict(list)
+    for vid, node_depth in enumerate(prefix_graph.depth):
+        nodes_by_depth[node_depth].append(vid)
+
+    prefix_graph.graph = graph
+    prefix_graph.children = children
+    prefix_graph.leaves = leaves
+    prefix_graph.nodes_by_depth = dict(nodes_by_depth)
+    prefix_graph.max_depth = max(prefix_graph.depth) if prefix_graph.depth else 0
+
+
+def append_continuations_to_prefix_graph(
+    prefix_graph: PrefixGraph,
+    continuations: List[List[int]],
+    *,
+    row_start: int = 1,
+) -> List[int]:
+    new_node_ids: List[int] = []
+
+    for offset, continuation in enumerate(continuations):
+        if not continuation:
+            continue
+
+        current_path: List[int] = []
+        row_idx = row_start + offset
+        for tok in continuation:
+            current_path.append(tok)
+            path_tuple = tuple(current_path)
+            vid = prefix_graph.path_to_vid.get(path_tuple)
+            if vid is None:
+                parent_path = tuple(current_path[:-1])
+                parent_vid = prefix_graph.path_to_vid[parent_path]
+                vid = len(prefix_graph.parent)
+                prefix_graph.path_to_vid[path_tuple] = vid
+
+                prefix_graph.parent.append(parent_vid)
+                prefix_graph.depth.append(len(current_path))
+                prefix_graph.token_id.append(tok)
+                prefix_graph.gen_tokens.append(path_tuple)
+                prefix_graph.visit_count.append(0)
+                prefix_graph.first_seen_row.append(row_idx)
+                new_node_ids.append(vid)
+
+            prefix_graph.visit_count[vid] += 1
+
+    _rebuild_derived_graph_views(prefix_graph)
+    return new_node_ids
+
+
+def build_prefix_graph_from_continuations(prompt_text: str, continuations: List[List[int]]) -> PrefixGraph:
+    prefix_graph = create_empty_prefix_graph(prompt_text=prompt_text)
+    append_continuations_to_prefix_graph(prefix_graph, continuations, row_start=1)
+    return prefix_graph
