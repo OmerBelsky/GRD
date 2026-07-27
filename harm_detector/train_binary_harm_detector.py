@@ -1,4 +1,6 @@
 import os
+import sys
+sys.modules['torchvision'] = None
 import torch
 import pandas as pd
 import numpy as np
@@ -6,6 +8,10 @@ from transformers import DistilBertTokenizer, DistilBertModel
 from sklearn.metrics import classification_report, accuracy_score, f1_score
 import dill
 from harm_detector import HarmDetector
+
+
+# Prevent Python from importing torchvision by inserting a dummy module
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -91,19 +97,19 @@ aegis_train_df = preprocess_aegis(aegis_train_df)
 aegis_test_df = preprocess_aegis(aegis_test_df)
 
 clf = HarmDetector(bert_model=distilbert_model, tokenizer=distilbert_tokenizer, device=device, classification_head='logistic_regression')
-
 y_train = aegis_train_df['final_label'] != 'Safe'
-y_test = aegis_test_df['final_label'] != 'Safe'
+y_test = aegis_test_df['final_label'].notna()
 clf.fit(aegis_train_df, y_train)
 # Evaluate the model
-y_pred = clf.predict(aegis_test_df)
+batch_size = 32
+y_pred = np.concatenate([clf.predict(aegis_test_df.iloc[i:i+batch_size]) for i in range(0, len(aegis_test_df), batch_size)])
 print(classification_report(y_test, y_pred))
 print("Accuracy:", accuracy_score(y_test, y_pred))
 print("F1 Score:", f1_score(y_test, y_pred, average='weighted'))
 print("F1 Score (macro):", f1_score(y_test, y_pred, average='macro'))
 
 # Evaluate on training set
-y_train_pred = clf.predict(aegis_train_df)
+y_train_pred = np.concatenate([clf.predict(aegis_train_df.iloc[i:i+batch_size]) for i in range(0, len(aegis_train_df), batch_size)])
 print(classification_report(y_train, y_train_pred))
 print("Accuracy:", accuracy_score(y_train, y_train_pred))
 print("F1 Score:", f1_score(y_train, y_train_pred, average='weighted'))

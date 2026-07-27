@@ -47,7 +47,14 @@ class HarmDetector(BaseEstimator, ClassifierMixin):
         return cls_emb
 
     def fit(self, X, y):
-        X_embedded = self.get_cls_embedding_batch(X['text'].tolist())
+        texts = X['text'].tolist()
+        batch_size = 32
+        embeddings = []
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i + batch_size]
+            batch_embeddings = self.get_cls_embedding_batch(batch_texts)
+            embeddings.append(batch_embeddings)
+        X_embedded = np.concatenate(embeddings, axis=0)
         self.classifier.fit(X_embedded, y)
         return self
 
