@@ -97,6 +97,15 @@ def assign_goal_labels(
             if not harmful_goal[first_harmful_prefix]:
                 harmful_goal[first_harmful_prefix] = True
                 harmful_count += 1
+
+            # Mark the harmful branch closed: once a node is flagged harmful, every
+            # descendant continuation under that node is also harmful and should not
+            # be allowed to count as a safe terminal goal.
+            stack = list(prefix_graph.children[first_harmful_prefix])
+            while stack:
+                node_id = stack.pop()
+                harmful_goal[node_id] = True
+                stack.extend(prefix_graph.children[node_id])
             continue
 
         depth = prefix_graph.depth[leaf_id]

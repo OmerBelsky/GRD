@@ -9,7 +9,7 @@ SCRIPT="$ROOT_DIR/grd_offline_wcd_igraph_baseline_samples.py"
 REPORT_DIR="${REPORT_DIR:-$ROOT_DIR/outputs/reports/offline_wcd_igraph_baseline_samples}"
 
 MODEL="${MODEL:-meta-llama/Llama-3.2-3B-Instruct}"
-DETECTOR="${DETECTOR:-$ROOT_DIR/harm_detector/models/binary_harm_detector.dill}"
+DETECTOR="${DETECTOR:-Qwen/Qwen3Guard-Stream-0.6B}"
 TEMPERATURE="${TEMPERATURE:-0.4}"
 TOP_P="${TOP_P:-0.8}"
 SYSTEM_PROMPT_ID="${SYSTEM_PROMPT_ID:-}"

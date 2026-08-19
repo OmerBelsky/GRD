@@ -73,7 +73,7 @@ def load_model_auto(
 
     model_kwargs: Dict[str, Any] = {
         "token": token,
-        "dtype": resolved_dtype,
+        "torch_dtype": resolved_dtype,
         "low_cpu_mem_usage": low_cpu_mem_usage,
     }
 

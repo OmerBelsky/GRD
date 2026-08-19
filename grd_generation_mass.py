@@ -524,7 +524,7 @@ def score_sequence_logs(
     input_tensor = torch.tensor([seq_ids], dtype=torch.long, device=model.device)
 
     with torch.no_grad():
-        logits = model(input_ids=input_tensor).logits[0]
+        logits = model(input_ids=input_tensor, use_cache=True).logits[0]
 
     prompt_len = len(prompt_ids)
     log_mass_original = 0.0
@@ -565,6 +565,109 @@ def score_sequence_logs(
     return log_mass_original, log_mass_nucleus, len(continuation_ids)
 
 
+def score_sequence_logs_batch(
+    model,
+    items,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    *,
+    backend: str = "transformers",
+    vllm_client: Optional[VLLMGenerateClient] = None,
+    batch_size: int = 32,
+):
+    """Batch-score several prompt/continuation pairs with a single model forward pass when possible."""
+    if backend == "vllm":
+        if vllm_client is None:
+            raise ValueError("vllm backend requires vllm_client")
+        return [
+            (*item, *vllm_client.score_sequence(item[1], item[2], temperature, top_p, top_k))
+            if isinstance(item, tuple) and len(item) >= 3
+            else (*item, *vllm_client.score_sequence(item.prompt_ids, item.continuation_ids, temperature, top_p, top_k))
+            for item in items
+        ]
+
+    results = []
+    effective_batch_size = max(1, batch_size)
+    n_batches = max(1, math.ceil(len(items) / effective_batch_size))
+    print(
+        f"Using batched transformer mass scoring for {len(items)} sequences "
+        f"(batch_size={effective_batch_size}, batches={n_batches})"
+    )
+
+    for start in tqdm(
+        range(0, len(items), effective_batch_size),
+        total=n_batches,
+        desc="Batched mass scoring",
+        unit="batch",
+    ):
+        batch = items[start : start + effective_batch_size]
+        seqs = []
+        for item in batch:
+            if isinstance(item, tuple) and len(item) >= 3:
+                prompt_ids, continuation_ids = item[1], item[2]
+            else:
+                prompt_ids, continuation_ids = item.prompt_ids, item.continuation_ids
+            seqs.append(prompt_ids + continuation_ids)
+
+        max_len = max(len(seq) for seq in seqs)
+        batch_tensor = torch.full((len(seqs), max_len), fill_value=0, dtype=torch.long, device=model.device)
+        for i, seq in enumerate(seqs):
+            batch_tensor[i, : len(seq)] = torch.tensor(seq, dtype=torch.long, device=model.device)
+
+        with torch.no_grad():
+            logits = model(input_ids=batch_tensor, use_cache=True).logits
+
+        for idx, item in enumerate(batch):
+            if isinstance(item, tuple) and len(item) >= 3:
+                prompt_ids, continuation_ids = item[1], item[2]
+                source_item = item[0]
+            else:
+                prompt_ids, continuation_ids = item.prompt_ids, item.continuation_ids
+                source_item = item
+
+            prompt_len = len(prompt_ids)
+            log_mass_original = 0.0
+            log_mass_nucleus = 0.0
+
+            seq_logits = logits[idx]
+            for j, target_tid in enumerate(continuation_ids):
+                pos = prompt_len - 1 + j
+                next_logits = seq_logits[pos]
+
+                if temperature <= 0:
+                    argmax_tid = int(torch.argmax(next_logits).item())
+                    if target_tid == argmax_tid:
+                        step_logprob_original = 0.0
+                        step_logprob_nucleus = 0.0
+                    else:
+                        step_logprob_original = -float("inf")
+                        step_logprob_nucleus = -float("inf")
+                else:
+                    scaled_scores = next_logits / temperature
+                    full_log_probs = torch.log_softmax(scaled_scores, dim=-1)
+                    step_logprob_original = float(full_log_probs[target_tid].item())
+
+                    filtered_scores, candidate_mask = apply_generation_warpers(
+                        logits_1d=next_logits,
+                        temperature=temperature,
+                        top_p=top_p,
+                        top_k=top_k,
+                    )
+                    step_logprob_nucleus = compute_nucleus_log_prob(
+                        filtered_scores=filtered_scores,
+                        target_tid=target_tid,
+                        candidate_mask=candidate_mask,
+                    )
+
+                log_mass_original += step_logprob_original
+                log_mass_nucleus += step_logprob_nucleus
+
+            results.append((source_item, log_mass_original, log_mass_nucleus, len(continuation_ids)))
+
+    return results
+
+
 def score_unique_generations(
     unique_generations: List[UniqueGeneration],
     *,
@@ -599,6 +702,28 @@ def score_unique_generations(
                 unit="gen",
             ):
                 yield future.result()
+    elif backend == "transformers" and len(unique_generations) > 1:
+        batch_size = max(1, min(32, len(unique_generations)))
+        print(
+            f"Using batched transformer mass scoring for {len(unique_generations)} unique generations "
+            f"(batch_size={batch_size})"
+        )
+        for result in tqdm(
+            score_sequence_logs_batch(
+                model=model,
+                items=unique_generations,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                backend=backend,
+                vllm_client=vllm_client,
+                batch_size=batch_size,
+            ),
+            desc="Scoring unique generations (batched)",
+            unit="gen",
+            total=len(unique_generations),
+        ):
+            yield result
     else:
         for item in tqdm(unique_generations, desc="Scoring unique generations", unit="gen"):
             yield _score_item(item)
