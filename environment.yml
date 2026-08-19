@@ -133,6 +133,7 @@ dependencies:
       - idna==3.15
       - igraph==1.0.0
       - ijson==3.5.0
+      - iniconfig==2.3.0
       - interegular==0.3.3
       - jinja2==3.1.6
       - jiter==0.15.0
@@ -206,6 +207,7 @@ dependencies:
       - partial-json-parser==0.2.1.1.post7
       - patsy==1.0.2
       - pillow==12.2.0
+      - pluggy==1.6.0
       - prometheus-client==0.25.0
       - prometheus-fastapi-instrumentator==8.0.0
       - propcache==0.5.2
@@ -221,6 +223,7 @@ dependencies:
       - pyelftools==0.33
       - pyjwt==2.13.0
       - pyparsing==3.3.2
+      - pytest==9.1.1
       - python-dotenv==1.2.2
       - python-json-logger==4.1.0
       - python-multipart==0.0.29
@@ -253,7 +256,7 @@ dependencies:
       - threadpoolctl==3.6.0
       - tiktoken==0.13.0
       - tilelang==0.1.9
-      - tokenizers==0.22.2
+      - tokenizers==0.21.4
       - tokenspeed-mla==0.1.2
       - tokenspeed-triton==3.7.10.post20260530
       - torch==2.11.0+cu128
@@ -261,7 +264,7 @@ dependencies:
       - torchaudio==2.11.0
       - torchvision==0.26.0
       - tqdm==4.67.3
-      - transformers==4.57.3
+      - transformers==4.55.0
       - triton==3.6.0
       - typer==0.25.1
       - typing-inspection==0.4.2
